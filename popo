@@ -1,0 +1,112 @@
+local Config = {
+    UpHeight = 60,
+    DownOffset = 3,
+    UpSpeed = 120,
+    CruiseSpeed = 120,
+    DownSpeed = 120,
+    CriminalCruiseSpeed = 300,
+    TeleportDistance = 15,
+    OnFootDescendDistance = 3,
+    OnFootFlySpeed = 170,
+    CloseBackDistance = 4,
+    BackOffset = 5,
+    AbortLaunchHeight = 300,
+    LeadTime = 1.0,
+    MaxLeadDistance = 40, 
+}
+
+local function GetPredictedTargetPosition(targetRoot)
+    if not targetRoot then return Vector3.zero end
+    
+    -- Extract target velocity (fallback to AssemblyLinearVelocity for newer Roblox physics)
+    local targetVel = targetRoot.AssemblyLinearVelocity or targetRoot.Velocity or Vector3.zero
+    
+    -- Flatten Y-axis velocity to prevent floating up/down unnaturally if target jumps
+    local horizontalVel = Vector3.new(targetVel.X, 0, targetVel.Z)
+    
+    -- Calculate advance studs based on velocity over LeadTime
+    local leadVector = horizontalVel * Config.LeadTime
+    if leadVector.Magnitude > Config.MaxLeadDistance then
+        leadVector = leadVector.Unit * Config.MaxLeadDistance
+    end
+    
+    return targetRoot.Position + leadVector
+end
+
+local function flyOnFootToTargetAndBackTeleport(char, root, crimPlayer, speed)
+    local crimChar = crimPlayer.Character
+    local targetRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return end
+
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    bv.Velocity = Vector3.zero
+    bv.Parent = root
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    bg.CFrame = root.CFrame
+    bg.Parent = root
+
+    -- Phase 1: Dynamic Fly with Predictive Advance Studs & Lock-On
+    while char.Parent and root.Parent and targetRoot and targetRoot.Parent and not IsInVehicle() do
+        -- Continuous Safety check during flight
+        if IsUndergroundOrIndoor(crimChar) then
+            print("[ON FOOT ABORT] Target entered building/cave during foot chase!")
+            bv:Destroy()
+            bg:Destroy()
+            return
+        end
+
+        EquipHandcuffs()
+        
+        -- Calculate predicted position ahead of the target
+        local predictedPos = GetPredictedTargetPosition(targetRoot)
+        local diff = predictedPos - root.Position
+        local realDist = (targetRoot.Position - root.Position).Magnitude
+        local dt = task.wait()
+
+        -- Auto Lock Camera / Orientation towards target's predicted position
+        bg.CFrame = CFrame.lookAt(root.Position, Vector3.new(predictedPos.X, root.Position.Y, predictedPos.Z))
+
+        -- Switch to back-teleport arrest if within range of actual root position
+        if realDist <= Config.CloseBackDistance then
+            print("[CLOSE ENOUGH] Reached target range! Switching to back-teleport lock & arrest...")
+            break
+        end
+
+        -- Move towards predicted lead position
+        if diff.Magnitude > 0 then
+            root.CFrame = CFrame.new(root.Position + diff.Unit * math.min(diff.Magnitude, speed * dt))
+        end
+    end
+
+    bv:Destroy()
+    bg:Destroy()
+
+    -- Phase 2: Lock-On Loop Teleport 5 studs behind target's back & Arrest
+    while char.Parent and root.Parent and targetRoot and targetRoot.Parent and not IsInVehicle() do
+        if IsUndergroundOrIndoor(crimChar) then
+            print("[TELEPORT ABORT] Target ran inside building/cave!")
+            break
+        end
+
+        EquipHandcuffs()
+        
+        -- Network replication bypass
+        if typeof(sethiddenproperty) == "function" then
+            pcall(function()
+                sethiddenproperty(root, "PhysicsRepRootPart", targetRoot)
+            end)
+        end
+        
+        -- Locked relative attachment behind the player
+        local backCFrame = targetRoot.CFrame * CFrame.new(0, 0, Config.BackOffset)
+        root.CFrame = backCFrame
+
+        -- Fire arrest target
+        ArrestTarget(crimPlayer)
+
+        task.wait()
+    end
+end
