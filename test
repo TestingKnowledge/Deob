@@ -1,0 +1,1358 @@
+```lua
+if not LPH_OBFUSCATED then
+    LPH_JIT_MAX = function(...) return (...) end
+    LPH_NO_VIRTUALIZE = function(...) return (...) end
+    LRM_IsUserPremium = true
+    script_key = "a"
+end
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local LocalPlayer = Players.LocalPlayer
+local OverwriteCnt = 0
+local ExitFunc = nil
+local isRunning = false
+local IsInVehicle
+local vehicleUtils = nil
+local rememberedCar = nil
+pcall(function()
+    vehicleUtils = require(ReplicatedStorage:WaitForChild("Vehicle"):WaitForChild("VehicleUtils"))
+end)
+local function monitor(p)
+    local function char(c)
+        c:GetAttributeChangedSignal("HasHandcuffs"):Connect(function()
+            if c:GetAttribute("HasHandcuffs") then
+                print("[HANDCUFFED] " .. p.Name)
+            end
+        end)
+    end
+    if p.Character then
+        char(p.Character)
+    end
+    p.CharacterAdded:Connect(char)
+end
+for _, p in ipairs(Players:GetPlayers()) do
+    monitor(p)
+end
+Players.PlayerAdded:Connect(monitor)
+print("[ARREST MONITOR] READY")
+local function UpdateRememberedCar()
+    if vehicleUtils then
+        pcall(function()
+            local ok, m = pcall(vehicleUtils.GetLocalVehicleModel)
+            if ok and m and m ~= "" and m ~= false then
+                local car = typeof(m) == "Instance" and m or workspace:FindFirstChild(m, true)
+                if car and rememberedCar ~= car then
+                    rememberedCar = car
+                    print("[VEHICLE SAVED] " .. car:GetFullName())
+                end
+            end
+        end)
+    end
+end
+local function GetMyCar()
+    UpdateRememberedCar()
+    return rememberedCar
+end
+task.spawn(function()
+    while task.wait(0.5) do
+        UpdateRememberedCar()
+    end
+end)
+local function createLinearMover(root)
+    if not root or not root.Parent then
+        return nil, nil
+    end
+    local attachment = Instance.new("Attachment")
+    attachment.Name = "AutoFlightAttachment"
+    attachment.Parent = root
+    local lv = Instance.new("LinearVelocity")
+    lv.Name = "AutoFlightLinearVelocity"
+    lv.Attachment0 = attachment
+    lv.RelativeTo = Enum.ActuatorRelativeTo.World
+    lv.VelocityConstraintMode = Enum.VelocityConstraintMode.Vector
+    lv.VectorVelocity = Vector3.zero
+    pcall(function()
+        lv.ForceLimitsEnabled = false
+    end)
+    pcall(function()
+        lv.MaxForce = math.huge
+    end)
+    lv.Parent = root
+    return lv, attachment
+end
+local function createFlightGyro(root)
+    if not root or not root.Parent then
+        return nil
+    end
+    local bg = Instance.new("BodyGyro")
+    bg.Name = "AutoFlightBodyGyro"
+    bg.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    bg.D = 50000
+    bg.P = 1500000000
+    bg.CFrame = root.CFrame
+    bg.Parent = root
+    return bg
+end
+local function destroyMover(lv, attachment, bg)
+    if bg then
+        pcall(function()
+            bg:Destroy()
+        end)
+    end
+    if lv then
+        pcall(function()
+            lv:Destroy()
+        end)
+    end
+    if attachment then
+        pcall(function()
+            attachment:Destroy()
+        end)
+    end
+end
+local function cleanupOldMotion(root)
+    if not root then
+        return
+    end
+    for _, obj in ipairs(root:GetChildren()) do
+        if obj.Name == "AutoFlightLinearVelocity" or obj.Name == "AutoFlightAttachment" or obj.Name == "AutoFlightBodyGyro" or obj.Name == "AutoFlightAlignOrientation" then
+            pcall(function()
+                obj:Destroy()
+            end)
+        end
+    end
+end
+local function moveToFlightAltitude(root, targetAltitude, maxSpeed)
+    if not root or not root.Parent then
+        return nil
+    end
+    cleanupOldMotion(root)
+    local lv, attachment = createLinearMover(root)
+    local bg = createFlightGyro(root)
+    if not lv then
+        return nil
+    end
+    local speed = maxSpeed or 300
+    local startTime = tick()
+    local timeout = 12
+    while root and root.Parent and IsInVehicle() do
+        local diffY = targetAltitude - root.Position.Y
+        if math.abs(diffY) <= 1.0 then
+            lv.VectorVelocity = Vector3.zero
+            break
+        end
+        local verticalSpeed = math.clamp(diffY * 5, -speed, speed)
+        lv.VectorVelocity = Vector3.new(0, verticalSpeed, 0)
+        if bg then
+            bg.CFrame = CFrame.new(root.Position)
+        end
+        if tick() - startTime >= timeout then
+            lv.VectorVelocity = Vector3.zero
+            break
+        end
+        task.wait()
+    end
+    if root and root.Parent and IsInVehicle() then
+        lv.VectorVelocity = Vector3.zero
+        if bg then
+            bg.CFrame = CFrame.new(root.Position)
+        end
+        return {
+            lv = lv,
+            attachment = attachment,
+            bg = bg,
+            altitude = targetAltitude
+        }
+    end
+    destroyMover(lv, attachment, bg)
+    return nil
+end
+local function maintainFlightHover(root, hover, targetAltitude)
+    if not root or not root.Parent or not hover or not hover.lv then
+        return
+    end
+    local diffY = targetAltitude - root.Position.Y
+    local verticalSpeed = math.clamp(diffY * 5, -300, 300)
+    if math.abs(diffY) <= 1.0 then
+        verticalSpeed = 0
+    end
+    hover.lv.VectorVelocity = Vector3.new(0, verticalSpeed, 0)
+    if hover.bg then
+        hover.bg.CFrame = CFrame.new(root.Position)
+    end
+end
+local invSys
+pcall(function()
+    local inventory = ReplicatedStorage:FindFirstChild("Inventory", true)
+    local itemSystem = inventory and inventory:FindFirstChild("InventoryItemSystem", true)
+    if itemSystem then
+        invSys = require(itemSystem)
+    end
+end)
+local attemptArrest = nil
+pcall(function()
+    for _, v in pairs(getgc(true)) do
+        if type(v) == "function" then
+            local name = ""
+            pcall(function()
+                name = debug.info(v, "n")
+            end)
+            if name == "" and getinfo then
+                pcall(function()
+                    name = tostring(getinfo(v).name)
+                end)
+            end
+            if name == "AttemptArrest" then
+                attemptArrest = v
+                break
+            end
+        end
+    end
+end)
+if LPH_NO_VIRTUALIZE then
+    LPH_NO_VIRTUALIZE(function()
+        for _, v in pairs(getgc(true)) do
+            if typeof(v) == "function" then
+                local fname = ""
+                pcall(function()
+                    fname = debug.info(v, "n") or ""
+                end)
+                if fname ~= "" and fname:match("CheatCheck") then
+                    hookfunction(v, function()
+                    end)
+                end
+            end
+            if typeof(v) == "function" and getfenv then
+                local ok, env = pcall(getfenv, v)
+                if ok and env and env.script == LocalPlayer.PlayerScripts:FindFirstChild("LocalScript") then
+                    local con = getconstants(v)
+                    if table.find(con, "LastVehicleExit") and table.find(con, "tick") then
+                        ExitFunc = v
+                    end
+                end
+            end
+        end
+    end)()
+    LPH_NO_VIRTUALIZE(function()
+        for _, v in pairs(workspace:GetChildren()) do
+            if v.Name == "Bench" then
+                v:Destroy()
+            end
+        end
+    end)()
+    local TagUtils = require(ReplicatedStorage:FindFirstChild("TagUtils", true))
+    if TagUtils then
+        TagUtils.isPointInTag = LPH_NO_VIRTUALIZE(function(_, Tag)
+            if Tag == "NoFallDamage" or Tag == "NoRagdoll" or Tag == "NoParachute" then
+                return true
+            end
+        end)
+    end
+end
+local Config = {
+    UpHeight = 70,
+    DownOffset = 3,
+    UpSpeed = 120,
+    CruiseSpeed = 120,
+    DownSpeed = 300,
+    CriminalCruiseSpeed = 300,
+    TeleportDistance = 7,
+    OnFootDescendDistance = 6,
+    OnFootFlySpeed = 190,
+    CloseBackDistance = 4,
+    BackOffset = 5,
+    AbortLaunchHeight = 300,
+    FlightAltitude = 500,
+    FlightAltitudeTolerance = 1,
+    AltitudeCorrectionSpeed = 300,
+    OverheadRayDistance = 180,
+    OverheadInnerRadius = 3.5,
+    OverheadOuterRadius = 7,
+    OverheadClusterTolerance = 18,
+    OverheadMinHits = 5,
+    OverheadOuterMinHits = 4,
+    OverheadQuadrantMin = 3,
+    OverheadCacheTime = 0.10,
+    OverheadCacheMoveDistance = 2.5,
+    OverheadDebug = false
+}
+local Stations = {
+    ["Custom Main Station Path"] = {
+        Base = Vector3.new(-1173.24, 39.42, -1583.77),
+        Path = {
+            Vector3.new(-1173.24, 39.42, -1583.77),
+            Vector3.new(-1177.93, 39.42, -1580.66),
+            Vector3.new(-1184.32, 39.42, -1575.63),
+            Vector3.new(-1188.49, 39.42, -1568.75),
+            Vector3.new(-1187.33, 39.42, -1560.60),
+            Vector3.new(-1184.78, 39.42, -1552.89),
+            Vector3.new(-1182.62, 39.42, -1546.72),
+            Vector3.new(-1175.61, 34.97, -1546.03),
+            Vector3.new(-1168.76, 30.16, -1546.55),
+            Vector3.new(-1161.44, 27.15, -1547.99),
+            Vector3.new(-1156.07, 23.25, -1551.89),
+            Vector3.new(-1154.36, 21.12, -1559.06),
+            Vector3.new(-1157.26, 19.07, -1566.29),
+            Vector3.new(-1162.58, 19.02, -1572.38),
+            Vector3.new(-1169.74, 19.02, -1576.19),
+            Vector3.new(-1177.62, 19.02, -1578.67),
+            Vector3.new(-1185.61, 19.07, -1580.14),
+            Vector3.new(-1193.86, 19.07, -1580.63),
+            Vector3.new(-1201.85, 19.07, -1580.43),
+            Vector3.new(-1209.98, 19.07, -1580.09),
+            Vector3.new(-1218.11, 19.07, -1580.18),
+            Vector3.new(-1226.36, 19.07, -1579.78),
+            Vector3.new(-1234.43, 19.02, -1578.75),
+            Vector3.new(-1239.75, 19.07, -1573.05),
+            Vector3.new(-1243.11, 19.07, -1565.64),
+            Vector3.new(-1248.50, 19.02, -1559.53),
+            Vector3.new(-1256.50, 19.02, -1558.65),
+            Vector3.new(-1262.43, 19.02, -1554.62),
+            Vector3.new(-1259.15, 18.71, -1549.22),
+            Vector3.new(-1251.26, 18.62, -1547.54),
+            Vector3.new(-1244.88, 18.62, -1546.87)
+        }
+    },
+    ["Fourth Station"] = {
+        Base = Vector3.new(1786.66, 24.05, -4019.01),
+        Path = {
+            Vector3.new(1762.26, 24.00, -4024.93),
+            Vector3.new(1765.20, 24.02, -4026.29),
+            Vector3.new(1772.61, 24.05, -4029.64),
+            Vector3.new(1779.17, 24.00, -4034.16),
+            Vector3.new(1785.04, 24.00, -4040.16),
+            Vector3.new(1790.33, 24.25, -4046.51),
+            Vector3.new(1792.76, 24.50, -4049.68),
+            Vector3.new(1793.25, 24.50, -4053.24),
+            Vector3.new(1790.91, 24.09, -4061.18),
+            Vector3.new(1786.38, 24.10, -4068.25),
+            Vector3.new(1784.77, 24.10, -4076.59),
+            Vector3.new(1778.85, 23.80, -4092.15),
+            Vector3.new(1778.73, 23.80, -4093.07)
+        }
+    },
+    ["Main Police Station Ground"] = {
+        Base = Vector3.new(-1171.10, 18.80, -1579.22),
+        Path = {
+            Vector3.new(-1142.16, 18.85, -1586.02),
+            Vector3.new(-1146.80, 18.85, -1585.55),
+            Vector3.new(-1155.16, 18.85, -1584.71),
+            Vector3.new(-1163.53, 18.85, -1583.90),
+            Vector3.new(-1171.65, 18.85, -1583.56),
+            Vector3.new(-1179.64, 18.85, -1583.26),
+            Vector3.new(-1188.04, 18.85, -1582.97),
+            Vector3.new(-1196.30, 18.85, -1582.68),
+            Vector3.new(-1204.70, 18.85, -1582.39),
+            Vector3.new(-1212.83, 18.85, -1582.11),
+            Vector3.new(-1220.96, 18.85, -1581.82),
+            Vector3.new(-1229.09, 18.85, -1581.42),
+            Vector3.new(-1236.90, 18.80, -1579.45),
+            Vector3.new(-1241.89, 18.85, -1573.22),
+            Vector3.new(-1244.30, 18.85, -1565.59),
+            Vector3.new(-1249.61, 18.80, -1559.48),
+            Vector3.new(-1257.60, 18.80, -1559.35),
+            Vector3.new(-1263.00, 18.79, -1555.37),
+            Vector3.new(-1260.26, 18.40, -1547.61),
+            Vector3.new(-1252.41, 18.40, -1546.17),
+            Vector3.new(-1244.15, 18.40, -1546.12),
+            Vector3.new(-1244.08, 18.40, -1546.12)
+        }
+    },
+    ["Museum Police Station"] = {
+        Base = Vector3.new(738.20, 44.96, 1120.53),
+        Path = {
+            Vector3.new(732.75, 44.96, 1125.10),
+            Vector3.new(733.10, 44.96, 1122.05),
+            Vector3.new(733.02, 44.96, 1113.69),
+            Vector3.new(731.74, 44.96, 1105.80),
+            Vector3.new(730.05, 44.96, 1097.57),
+            Vector3.new(728.25, 44.95, 1089.37),
+            Vector3.new(730.33, 44.94, 1081.29),
+            Vector3.new(735.58, 44.37, 1075.00),
+            Vector3.new(741.75, 44.77, 1069.30),
+            Vector3.new(744.70, 44.96, 1066.60)
+        }
+    },
+    ["Military Base"] = {
+        Base = Vector3.new(1801.00, 25.54, -891.02),
+        Path = {
+            Vector3.new(1805.17, 25.54, -900.65),
+            Vector3.new(1805.17, 25.54, -900.65),
+            Vector3.new(1799.38, 25.54, -901.80),
+            Vector3.new(1791.31, 25.57, -902.75),
+            Vector3.new(1783.10, 25.60, -903.71),
+            Vector3.new(1775.02, 25.54, -904.70),
+            Vector3.new(1766.97, 25.54, -905.80),
+            Vector3.new(1758.94, 25.54, -907.13),
+            Vector3.new(1753.12, 25.54, -908.27),
+            Vector3.new(1753.12, 25.54, -908.27)
+        }
+    },
+    ["Fifth Station"] = {
+        Base = Vector3.new(1822.10, 25.55, -636.60),
+        Path = {
+            Vector3.new(1820.55, 25.54, -607.59),
+            Vector3.new(1822.75, 25.54, -616.20),
+            Vector3.new(1827.02, 25.54, -623.28),
+            Vector3.new(1831.25, 25.54, -630.38),
+            Vector3.new(1835.55, 25.08, -637.60),
+            Vector3.new(1844.01, 25.00, -651.80),
+            Vector3.new(1848.31, 25.00, -659.02)
+        }
+    }
+}
+local function GetCurrentVehicle()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local seat = hum and hum.SeatPart
+    if seat then
+        return seat:FindFirstAncestorOfClass("Model") or seat.Parent
+    end
+    return nil
+end
+local function GetTargetVehicle(char)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local seat = hum and hum.SeatPart
+    if seat then
+        return seat:FindFirstAncestorOfClass("Model") or seat.Parent
+    end
+    local vehiclesFolder = workspace:FindFirstChild("Vehicles")
+    if vehiclesFolder then
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            for _, v in ipairs(vehiclesFolder:GetChildren()) do
+                if (v:GetPivot().Position - root.Position).Magnitude < 15 then
+                    return v
+                end
+            end
+        end
+    end
+    return nil
+end
+IsInVehicle = function()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    return (hum and (hum.Sit or hum.SeatPart ~= nil)) or (GetCurrentVehicle() ~= nil)
+end
+local enclosureCache = setmetatable({}, {__mode = "k"})
+local function GetOverheadExclusionList(character)
+    local exclusionList = {}
+    if character then
+        table.insert(exclusionList, character)
+    end
+    if LocalPlayer.Character and LocalPlayer.Character ~= character then
+        table.insert(exclusionList, LocalPlayer.Character)
+    end
+    local vehiclesFolder = workspace:FindFirstChild("Vehicles")
+    if vehiclesFolder then
+        table.insert(exclusionList, vehiclesFolder)
+    end
+    for _, player in ipairs(Players:GetPlayers()) do
+        local playerCharacter = player.Character
+        if playerCharacter then
+            table.insert(exclusionList, playerCharacter)
+        end
+    end
+    return exclusionList
+end
+local function HasStructuralAncestor(instance)
+    if not instance then
+        return false
+    end
+    local current = instance
+    for _ = 1, 5 do
+        if not current then
+            break
+        end
+        local lower = current.Name:lower()
+        if lower:find("building", 1, true) or lower:find("roof", 1, true) or lower:find("ceiling", 1, true) or lower:find("cave", 1, true) or lower:find("structure", 1, true) or lower:find("tunnel", 1, true) or lower:find("garage", 1, true) or lower:find("interior", 1, true) or lower:find("warehouse", 1, true) or lower:find("basement", 1, true) then
+            return true
+        end
+        current = current.Parent
+    end
+    return false
+end
+local function IsLikelyOverheadGeometry(rayResult)
+    if not rayResult or not rayResult.Instance then
+        return false
+    end
+    local hitInstance = rayResult.Instance
+    if hitInstance == workspace.Terrain then
+        return true
+    end
+    if not hitInstance:IsA("BasePart") then
+        return false
+    end
+    local partName = hitInstance.Name:lower()
+    if partName:find("tree", 1, true) or partName:find("leaf", 1, true) or partName:find("foliage", 1, true) or partName:find("branch", 1, true) or partName:find("bush", 1, true) then
+        if not HasStructuralAncestor(hitInstance) then
+            return false
+        end
+    end
+    local normal = rayResult.Normal
+    local overheadFace = normal.Y <= -0.15
+    if not overheadFace then
+        return HasStructuralAncestor(hitInstance)
+    end
+    local size = hitInstance.Size
+    local horizontalArea = size.X * size.Z
+    local widePart = (size.X >= 4 and size.Z >= 4) or horizontalArea >= 30
+    local structuralPart = HasStructuralAncestor(hitInstance)
+    if widePart or structuralPart then
+        return true
+    end
+    if hitInstance.Material == Enum.Material.Concrete or hitInstance.Material == Enum.Material.Rock or hitInstance.Material == Enum.Material.Cobblestone or hitInstance.Material == Enum.Material.Brick or hitInstance.Material == Enum.Material.Slate then
+        return horizontalArea >= 12
+    end
+    return false
+end
+local function IsUndergroundOrIndoor(character)
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then
+        return true
+    end
+    local now = tick()
+    local cached = enclosureCache[character]
+    if cached and now - cached.time <= Config.OverheadCacheTime and (root.Position - cached.position).Magnitude <= Config.OverheadCacheMoveDistance then
+        return cached.result
+    end
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = GetOverheadExclusionList(character)
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+    raycastParams.IgnoreWater = true
+    local origin = root.Position + Vector3.new(0, 1.5, 0)
+    local samples = {
+        {offset = Vector3.new(0, 0, 0), outer = false, quadrant = 0},
+        {offset = Vector3.new(Config.OverheadInnerRadius, 0, 0), outer = false, quadrant = 1},
+        {offset = Vector3.new(-Config.OverheadInnerRadius, 0, 0), outer = false, quadrant = 2},
+        {offset = Vector3.new(0, 0, Config.OverheadInnerRadius), outer = false, quadrant = 3},
+        {offset = Vector3.new(0, 0, -Config.OverheadInnerRadius), outer = false, quadrant = 4},
+        {offset = Vector3.new(Config.OverheadOuterRadius, 0, 0), outer = true, quadrant = 1},
+        {offset = Vector3.new(-Config.OverheadOuterRadius, 0, 0), outer = true, quadrant = 2},
+        {offset = Vector3.new(0, 0, Config.OverheadOuterRadius), outer = true, quadrant = 3},
+        {offset = Vector3.new(0, 0, -Config.OverheadOuterRadius), outer = true, quadrant = 4},
+        {offset = Vector3.new(Config.OverheadOuterRadius * 0.707, 0, Config.OverheadOuterRadius * 0.707), outer = true, quadrant = 3},
+        {offset = Vector3.new(-Config.OverheadOuterRadius * 0.707, 0, Config.OverheadOuterRadius * 0.707), outer = true, quadrant = 4},
+        {offset = Vector3.new(Config.OverheadOuterRadius * 0.707, 0, -Config.OverheadOuterRadius * 0.707), outer = true, quadrant = 1},
+        {offset = Vector3.new(-Config.OverheadOuterRadius * 0.707, 0, -Config.OverheadOuterRadius * 0.707), outer = true, quadrant = 2}
+    }
+    local centerHit = false
+    local totalHits = 0
+    local outerHits = 0
+    local hitHeights = {}
+    local quadrantHits = {}
+    local hitInstances = {}
+    for index, sample in ipairs(samples) do
+        local sampleOrigin = origin + sample.offset
+        local result = workspace:Raycast(sampleOrigin, Vector3.new(0, Config.OverheadRayDistance, 0), raycastParams)
+        if IsLikelyOverheadGeometry(result) then
+            totalHits = totalHits + 1
+            local hitY = result.Position.Y
+            table.insert(hitHeights, hitY)
+            hitInstances[result.Instance] = true
+            if index == 1 then
+                centerHit = true
+            end
+            if sample.outer then
+                outerHits = outerHits + 1
+                quadrantHits[sample.quadrant] = true
+            end
+        end
+    end
+    local result = false
+    local medianHeight = nil
+    local clusteredHits = 0
+    local quadrantCount = 0
+    if #hitHeights > 0 then
+        table.sort(hitHeights)
+        local middleIndex = math.ceil(#hitHeights / 2)
+        medianHeight = hitHeights[middleIndex]
+        for _, y in ipairs(hitHeights) do
+            if math.abs(y - medianHeight) <= Config.OverheadClusterTolerance then
+                clusteredHits = clusteredHits + 1
+            end
+        end
+        for _ in pairs(quadrantHits) do
+            quadrantCount = quadrantCount + 1
+        end
+        if centerHit and clusteredHits >= Config.OverheadMinHits then
+            local strongOuterCoverage = outerHits >= Config.OverheadOuterMinHits and quadrantCount >= Config.OverheadQuadrantMin
+            local strongOverallCoverage = totalHits >= Config.OverheadMinHits + 2
+            if strongOuterCoverage or strongOverallCoverage then
+                result = true
+            end
+        end
+    end
+    enclosureCache[character] = {
+        time = now,
+        position = root.Position,
+        result = result
+    }
+    if result and Config.OverheadDebug then
+        print("[ENCLOSURE] " .. character.Name .. " | hits=" .. tostring(totalHits) .. " | clustered=" .. tostring(clusteredHits) .. " | outer=" .. tostring(outerHits) .. " | quadrants=" .. tostring(quadrantCount) .. " | center=" .. tostring(centerHit) .. " | medianY=" .. tostring(medianHeight))
+    end
+    return result
+end
+local function FindNearestCriminal(root, radius)
+    local nearest, dist = nil, radius or math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Team and p.Team.Name == "Criminal" then
+            local c = p.Character
+            local r = c and c:FindFirstChild("HumanoidRootPart")
+            if r and not IsUndergroundOrIndoor(c) then
+                local d = (r.Position - root.Position).Magnitude
+                if d < dist then
+                    nearest, dist = p, d
+                end
+            end
+        end
+    end
+    return nearest, dist
+end
+local function FindNearestCamaroOrJeep(root, blacklisted)
+    local vehiclesFolder = workspace:FindFirstChild("Vehicles")
+    if not vehiclesFolder then
+        return nil
+    end
+    local nearest, dist = nil, math.huge
+    for _, v in ipairs(vehiclesFolder:GetChildren()) do
+        if not blacklisted[v] then
+            local n = v.Name:lower()
+            if n:find("camaro", 1, true) or n:find("jeep", 1, true) then
+                local p = v:GetPivot().Position
+                local d = (p - root.Position).Magnitude
+                if d < dist then
+                    nearest, dist = v, d
+                end
+            end
+        end
+    end
+    return nearest, dist
+end
+local function enterVehicle(root)
+    local UI = require(ReplicatedStorage.Module.UI)
+    local vehiclesFolder = workspace:FindFirstChild("Vehicles")
+    if not vehiclesFolder then
+        return
+    end
+    for _, v in pairs(vehiclesFolder:GetChildren()) do
+        if v:FindFirstChild("Seat") and (v.Seat.Position - root.Position).Magnitude < 15 then
+            for _, spec in pairs(UI.CircleAction.Specs) do
+                if spec.Part and spec.Part == v.Seat then
+                    spec:Callback(true)
+                    break
+                end
+            end
+            break
+        end
+    end
+end
+local function pressSpaceKey()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+    end)
+end
+local function EquipHandcuffs()
+    if not invSys then
+        return false
+    end
+    local success = false
+    pcall(function()
+        for _, item in pairs(invSys.getInventoryItemsFor(LocalPlayer)) do
+            if item.obj and item.obj.Name == "Handcuffs" then
+                item:AttemptSetEquipped(true)
+                success = true
+                break
+            end
+        end
+    end)
+    return success
+end
+local function UnequipHandcuffs()
+    if not invSys then
+        return false
+    end
+    local success = false
+    pcall(function()
+        for _, item in pairs(invSys.getInventoryItemsFor(LocalPlayer)) do
+            if item.obj and item.obj.Name == "Handcuffs" then
+                item:AttemptSetEquipped(false)
+                success = true
+                break
+            end
+        end
+    end)
+    return success
+end
+local function EjectVehicleTarget(targetVeh)
+    if not targetVeh then
+        return
+    end
+    local moduleFolder = ReplicatedStorage:FindFirstChild("Module", true)
+    local uiObject = moduleFolder and moduleFolder:FindFirstChild("UI", true)
+    if not uiObject then
+        return
+    end
+    local uiModule
+    pcall(function()
+        uiModule = require(uiObject)
+    end)
+    if uiModule and uiModule.CircleAction and uiModule.CircleAction.Specs then
+        for _, spec in pairs(uiModule.CircleAction.Specs) do
+            local isMatch = false
+            if spec.Part and (targetVeh:IsAncestorOf(spec.Part) or spec.Part:IsDescendantOf(targetVeh)) then
+                isMatch = true
+            elseif spec.Text and (spec.Text:lower():find("eject") or spec.Text:lower():find("passenger")) then
+                isMatch = true
+            end
+            if isMatch then
+                pcall(function()
+                    spec:Callback(true)
+                end)
+                break
+            end
+        end
+    end
+end
+local function ArrestTarget(targetPlayer)
+    if attemptArrest and targetPlayer then
+        pcall(function()
+            attemptArrest(targetPlayer)
+        end)
+    end
+end
+local function isTargetValid(targetRoot)
+    if not targetRoot or not targetRoot.Parent then
+        return false
+    end
+    local plr = Players:GetPlayerFromCharacter(targetRoot.Parent)
+    if not plr or not plr.Team or plr.Team.Name ~= "Criminal" then
+        return false
+    end
+    if targetRoot.Position.Y < 5 then
+        return false
+    end
+    return true
+end
+local function IsPursuitTargetValid(crimPlayer)
+    if not crimPlayer or crimPlayer == LocalPlayer then
+        return false
+    end
+    if not crimPlayer.Parent then
+        return false
+    end
+    if not crimPlayer.Team or crimPlayer.Team.Name ~= "Criminal" then
+        return false
+    end
+    local crimChar = crimPlayer.Character
+    local crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+    if not crimChar or not crimChar.Parent or not crimRoot or not crimRoot.Parent then
+        return false
+    end
+    if not isTargetValid(crimRoot) then
+        return false
+    end
+    if IsUndergroundOrIndoor(crimChar) then
+        return false
+    end
+    return true
+end
+local function ReturnToSavedCar()
+    print("[RETURN TO CAR] Attempting to return to saved vehicle...")
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then
+        print("[RETURN TO CAR] No character root!")
+        return false
+    end
+    local myCar = GetMyCar()
+    if not myCar or not myCar.Parent then
+        print("[RETURN TO CAR] Saved car not found or destroyed!")
+        return false
+    end
+    print("[RETURN TO CAR] Found saved car: " .. myCar:GetFullName())
+    UnequipHandcuffs()
+    task.wait(0.2)
+    print("[RETURN TO CAR] Ascending to return altitude...")
+    cleanupOldMotion(root)
+    local upLv, upAttachment = createLinearMover(root)
+    if not upLv then
+        return false
+    end
+    local targetY = root.Position.Y + 100
+    local start = tick()
+    while root and root.Parent and root.Position.Y < targetY and not IsInVehicle() do
+        upLv.VectorVelocity = Vector3.new(0, Config.UpSpeed, 0)
+        if tick() - start > 10 then
+            break
+        end
+        task.wait()
+    end
+    destroyMover(upLv, upAttachment)
+    if IsInVehicle() then
+        return true
+    end
+    print("[RETURN TO CAR] Cruising to car position...")
+    local carPos = myCar:GetPivot().Position
+    local cruiseCarPos = Vector3.new(carPos.X, root.Position.Y, carPos.Z)
+    cleanupOldMotion(root)
+    local lv, attachment = createLinearMover(root)
+    local bg = createFlightGyro(root)
+    if not lv then
+        return false
+    end
+    while root and root.Parent and myCar and myCar.Parent and not IsInVehicle() do
+        local diff = cruiseCarPos - root.Position
+        local dist = diff.Magnitude
+        if dist <= 5 then
+            break
+        end
+        lv.VectorVelocity = diff.Unit * Config.CruiseSpeed
+        if bg then
+            bg.CFrame = CFrame.lookAt(root.Position, cruiseCarPos)
+        end
+        task.wait()
+    end
+    print("[RETURN TO CAR] Descending beneath car...")
+    while root and root.Parent and myCar and myCar.Parent and not IsInVehicle() do
+        local descendCarPos = myCar:GetPivot().Position + Vector3.new(0, Config.DownOffset, 0)
+        local diff = descendCarPos - root.Position
+        if diff.Magnitude <= 5 then
+            break
+        end
+        lv.VectorVelocity = diff.Unit * Config.DownSpeed
+        if bg then
+            bg.CFrame = CFrame.lookAt(root.Position, descendCarPos)
+        end
+        task.wait()
+    end
+    destroyMover(lv, attachment, bg)
+    print("[RETURN TO CAR] Entering vehicle...")
+    for i = 1, 5 do
+        if IsInVehicle() then
+            print("[RETURN TO CAR] Successfully entered car!")
+            return true
+        end
+        enterVehicle(root)
+        task.wait(0.3)
+    end
+    if IsInVehicle() then
+        print("[RETURN TO CAR] Car entered successfully!")
+        return true
+    end
+    print("[RETURN TO CAR] Failed to enter car after 5 attempts")
+    return false
+end
+local function launchUpToSafety(root, launchAmount)
+    if not root or not root.Parent then
+        print("[SAFETY] Root is nil, cannot ascend")
+        return nil
+    end
+    if not IsInVehicle() then
+        return nil
+    end
+    local targetY = root.Position.Y + (launchAmount or Config.AbortLaunchHeight)
+    print("[SAFETY TRIGGERED] Ascending to safe altitude " .. tostring(targetY))
+    return moveToFlightAltitude(root, targetY, Config.AltitudeCorrectionSpeed)
+end
+local function flyToPos(char, root, targetPos)
+    if IsInVehicle() then
+        return
+    end
+    cleanupOldMotion(root)
+    local lv, attachment = createLinearMover(root)
+    local bg = createFlightGyro(root)
+    if not lv then
+        return
+    end
+    local function moveTo(dest, speed)
+        while char.Parent and root.Parent and not IsInVehicle() do
+            local diff = dest - root.Position
+            local dist = diff.Magnitude
+            if dist <= 3 then
+                break
+            end
+            lv.VectorVelocity = diff.Unit * speed
+            if bg then
+                bg.CFrame = CFrame.lookAt(root.Position, dest)
+            end
+            task.wait()
+        end
+    end
+    local upPos = root.Position + Vector3.new(0, Config.UpHeight, 0)
+    local cruisePos = Vector3.new(targetPos.X, upPos.Y, targetPos.Z)
+    local downPos = targetPos + Vector3.new(0, Config.DownOffset, 0)
+    moveTo(upPos, Config.UpSpeed)
+    moveTo(cruisePos, Config.CruiseSpeed)
+    moveTo(downPos, Config.DownSpeed)
+    destroyMover(lv, attachment, bg)
+end
+local function flyOnFootToTargetAndArrest(char, root, crimPlayer, speed)
+    print("[PURSUIT] Starting on-foot pursuit of criminal...")
+    print("[PURSUIT] 10-second timeout active")
+    if not char or not root or not root.Parent then
+        print("[PURSUIT] Character or root is nil!")
+        return false
+    end
+    if not IsPursuitTargetValid(crimPlayer) then
+        print("[PURSUIT ABORT] Target is already invalid/covered")
+        return false
+    end
+    local crimChar = crimPlayer.Character
+    local targetRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then
+        print("[PURSUIT] Target root disappeared, aborting")
+        return false
+    end
+    cleanupOldMotion(root)
+    local lv, attachment = createLinearMover(root)
+    local bg = createFlightGyro(root)
+    if not lv then
+        return false
+    end
+    local pursuitStart = tick()
+    local pursuitTimeout = 10
+    local arrestedFlag = false
+    while char and char.Parent and root and root.Parent and targetRoot and targetRoot.Parent and not IsInVehicle() do
+        if tick() - pursuitStart > pursuitTimeout then
+            print("[PURSUIT TIMEOUT] 10 seconds elapsed, aborting pursuit!")
+            break
+        end
+        if not IsPursuitTargetValid(crimPlayer) then
+            print("[PURSUIT ABORT] Target became invalid or entered cover!")
+            break
+        end
+        crimChar = crimPlayer.Character
+        targetRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+        if not targetRoot then
+            print("[PURSUIT ABORT] Target root disappeared!")
+            break
+        end
+        if crimChar:GetAttribute("HasHandcuffs") then
+            print("[PURSUIT SUCCESS] Target arrested!")
+            arrestedFlag = true
+            break
+        end
+        local diff = targetRoot.Position - root.Position
+        if diff.Magnitude > 0.05 then
+            lv.VectorVelocity = diff.Unit * speed
+            if bg then
+                bg.CFrame = CFrame.lookAt(root.Position, targetRoot.Position)
+            end
+        else
+            lv.VectorVelocity = Vector3.zero
+        end
+        if crimChar:GetAttribute("InVehicle") ~= true then
+            EquipHandcuffs()
+            ArrestTarget(crimPlayer)
+        end
+        task.wait()
+    end
+    lv.VectorVelocity = Vector3.zero
+    destroyMover(lv, attachment, bg)
+    if arrestedFlag then
+        print("[PURSUIT] Arrested! Unequipping handcuffs immediately...")
+        task.wait(0.1)
+        UnequipHandcuffs()
+        print("[PURSUIT] Handcuffs unequipped...")
+        return true
+    end
+    print("[PURSUIT] On-foot pursuit ended without arrest")
+    return false
+end
+local function flyVehicleToCriminal(root, crimPlayer, speed)
+    print("[VEHICLE] Starting pursuit of criminal in vehicle...")
+    if not IsPursuitTargetValid(crimPlayer) then
+        print("[VEHICLE ABORT] Target invalid before pursuit")
+        return false
+    end
+    local crimChar = crimPlayer.Character
+    local crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+    if not crimRoot then
+        print("[VEHICLE] Target root disappeared, aborting")
+        return false
+    end
+    local targetInVeh = crimChar:GetAttribute("InVehicle") == true
+    local stopDistance = targetInVeh and Config.TeleportDistance or Config.OnFootDescendDistance
+    local aborted = false
+    cleanupOldMotion(root)
+    local lv, attachment = createLinearMover(root)
+    local bg = createFlightGyro(root)
+    if not lv then
+        return false
+    end
+    print("[VEHICLE] Flying overhead to target...")
+    while root.Parent and IsInVehicle() and crimRoot and crimRoot.Parent do
+        if not IsPursuitTargetValid(crimPlayer) then
+            print("[VEHICLE ABORT] Target invalid during cruise!")
+            aborted = true
+            break
+        end
+        crimChar = crimPlayer.Character
+        crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+        if not crimRoot then
+            aborted = true
+            break
+        end
+        local targetPos = crimRoot.Position
+        local overheadPos = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
+        local diff = overheadPos - root.Position
+        local dist = diff.Magnitude
+        if dist <= 4 then
+            lv.VectorVelocity = Vector3.zero
+            break
+        end
+        lv.VectorVelocity = diff.Unit * speed
+        if bg then
+            bg.CFrame = CFrame.lookAt(root.Position, overheadPos)
+        end
+        task.wait()
+    end
+    if not aborted then
+        print("[VEHICLE] Descending towards target...")
+        while root.Parent and IsInVehicle() and crimRoot and crimRoot.Parent do
+            if not IsPursuitTargetValid(crimPlayer) then
+                print("[VEHICLE ABORT] Target invalid during descent!")
+                aborted = true
+                break
+            end
+            crimChar = crimPlayer.Character
+            crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+            if not crimRoot then
+                aborted = true
+                break
+            end
+            local currentTarget = crimRoot.Position
+            local currentDist = (root.Position - currentTarget).Magnitude
+            if currentDist <= stopDistance then
+                print("[VEHICLE] Reached stop distance: " .. string.format("%.2f", currentDist))
+                break
+            end
+            local diff = currentTarget - root.Position
+            if diff.Magnitude <= 0.05 then
+                lv.VectorVelocity = Vector3.zero
+            else
+                lv.VectorVelocity = diff.Unit * speed
+            end
+            if bg then
+                bg.CFrame = CFrame.lookAt(root.Position, currentTarget)
+            end
+            task.wait()
+        end
+    end
+    destroyMover(lv, attachment, bg)
+    if aborted then
+        print("[VEHICLE] Pursuit aborted; returning to fixed 500-stud flight altitude")
+        return false
+    end
+    if not IsPursuitTargetValid(crimPlayer) then
+        print("[VEHICLE ABORT] Target became invalid after approach")
+        return false
+    end
+    crimChar = crimPlayer.Character
+    crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+    if crimRoot and crimRoot.Parent then
+        local char = LocalPlayer.Character
+        if not targetInVeh then
+            print("[VEHICLE] Target on foot, exiting vehicle and pursuing on foot...")
+            for _, v in ipairs(char:GetDescendants()) do
+                if v:IsA("BasePart") then
+                    v.AssemblyLinearVelocity = Vector3.zero
+                    v.AssemblyAngularVelocity = Vector3.zero
+                end
+            end
+            local currentCar = GetMyCar()
+            if currentCar then
+                for _, v in ipairs(currentCar:GetDescendants()) do
+                    if v:IsA("BasePart") then
+                        v.AssemblyLinearVelocity = Vector3.zero
+                        v.AssemblyAngularVelocity = Vector3.zero
+                    end
+                end
+            end
+            pressSpaceKey()
+            EquipHandcuffs()
+            task.wait(0.2)
+            local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+            if myRoot and crimRoot and crimRoot.Parent then
+                flyOnFootToTargetAndArrest(char, myRoot, crimPlayer, Config.OnFootFlySpeed)
+            end
+            print("[VEHICLE] Attempting to return to saved vehicle...")
+            task.wait(0.3)
+            ReturnToSavedCar()
+            return true
+        else
+            print("[VEHICLE] Target in vehicle, ramming and ejecting...")
+            local targetVehicle = GetTargetVehicle(crimChar)
+            if targetVehicle then
+                local initialPop = targetVehicle:GetAttribute("VehicleTiresLastPop")
+                print("[RAMMING] Initial tire pop value: " .. tostring(initialPop))
+                local rStart = tick()
+                local maxRamTime = 0.1
+                while root and root.Parent and IsInVehicle() and crimRoot and crimRoot.Parent and tick() - rStart < maxRamTime do
+                    if not IsPursuitTargetValid(crimPlayer) then
+                        print("[RAMMING ABORT] Target became invalid/covered!")
+                        return false
+                    end
+                    local stillInVeh = crimChar:GetAttribute("InVehicle") == true
+                    if typeof(sethiddenproperty) == "function" then
+                        pcall(function()
+                            sethiddenproperty(root, "PhysicsRepRootPart", crimRoot)
+                        end)
+                    end
+                    root.CFrame = crimRoot.CFrame * CFrame.new(0, 0, 5)
+                    if stillInVeh then
+                        EjectVehicleTarget(targetVehicle)
+                    end
+                    local currentPop = targetVehicle:GetAttribute("VehicleTiresLastPop")
+                    if currentPop and initialPop and currentPop ~= initialPop then
+                        print("[TIRE POPPED!] Tire pop detected - breaking ram loop")
+                        task.wait(0.1)
+                        break
+                    end
+                    if not stillInVeh or not targetVehicle:IsDescendantOf(workspace) then
+                        print("[TARGET EXITED VEHICLE] Breaking ram loop...")
+                        break
+                    end
+                    task.wait()
+                end
+                print("[RAMMING COMPLETE] Ram duration: " .. string.format("%.2f", tick() - rStart) .. "s")
+                task.wait(0.1)
+            end
+            print("[AFTER RAMMING] Jumping out and chasing target on foot...")
+            for _, v in ipairs(char:GetDescendants()) do
+                if v:IsA("BasePart") then
+                    v.AssemblyLinearVelocity = Vector3.zero
+                    v.AssemblyAngularVelocity = Vector3.zero
+                end
+            end
+            local currentCar = GetMyCar()
+            if currentCar then
+                for _, v in ipairs(currentCar:GetDescendants()) do
+                    if v:IsA("BasePart") then
+                        v.AssemblyLinearVelocity = Vector3.zero
+                        v.AssemblyAngularVelocity = Vector3.zero
+                    end
+                end
+            end
+            pressSpaceKey()
+            EquipHandcuffs()
+            task.wait(0.2)
+            local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+            if myRoot and crimRoot and crimRoot.Parent then
+                flyOnFootToTargetAndArrest(char, myRoot, crimPlayer, Config.OnFootFlySpeed)
+            end
+            print("[VEHICLE] Attempting to return to saved vehicle...")
+            task.wait(0.3)
+            ReturnToSavedCar()
+            return true
+        end
+    end
+    return false
+end
+local function handleVehicleFlight()
+    print("[FLIGHT] Starting vehicle flight handler...")
+    UpdateRememberedCar()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then
+        print("[FLIGHT] Root not found!")
+        return
+    end
+    cleanupOldMotion(root)
+    local flightAltitude = root.Position.Y + Config.FlightAltitude
+    print("[FLIGHT] Safe flight altitude: " .. string.format("%.2f", flightAltitude))
+    print("[FLIGHT] Launching to fixed 500-stud altitude...")
+    local hover = moveToFlightAltitude(root, flightAltitude, Config.AltitudeCorrectionSpeed)
+    if not root.Parent or not IsInVehicle() then
+        if hover then
+            destroyMover(hover.lv, hover.attachment, hover.bg)
+        end
+        return
+    end
+    print("[FLIGHT] Reached safe 500-stud altitude")
+    print("[FLIGHT] Starting criminal search loop...")
+    while root.Parent and IsInVehicle() do
+        maintainFlightHover(root, hover, flightAltitude)
+        local nearestCrim, crimDist = FindNearestCriminal(root)
+        if nearestCrim then
+            print("[FLIGHT] Found criminal at distance: " .. crimDist)
+            if hover then
+                destroyMover(hover.lv, hover.attachment, hover.bg)
+                hover = nil
+            end
+            local success = flyVehicleToCriminal(root, nearestCrim, Config.CriminalCruiseSpeed)
+            if root.Parent and IsInVehicle() then
+                print("[FLIGHT] Pursuit complete/aborted; restoring fixed 500-stud hover...")
+                hover = moveToFlightAltitude(root, flightAltitude, Config.AltitudeCorrectionSpeed)
+                if not hover then
+                    print("[FLIGHT] Failed to restore hover; ending vehicle flight")
+                    break
+                end
+            else
+                break
+            end
+            if success then
+                print("[FLIGHT] Cycle completed! Searching for next target...")
+            else
+                print("[FLIGHT] Pursuit failed/aborted; remaining at 500 studs")
+            end
+            task.wait(0.5)
+        else
+            if not hover then
+                hover = moveToFlightAltitude(root, flightAltitude, Config.AltitudeCorrectionSpeed)
+            else
+                maintainFlightHover(root, hover, flightAltitude)
+            end
+            task.wait(1)
+        end
+    end
+    if hover then
+        destroyMover(hover.lv, hover.attachment, hover.bg)
+        hover = nil
+    end
+    if not root.Parent then
+        cleanupOldMotion(root)
+        return
+    end
+    if not IsInVehicle() then
+        cleanupOldMotion(root)
+        print("[FLIGHT] Vehicle flight ended because player left vehicle")
+        return
+    end
+    print("[FLIGHT] Entering interactive flight mode...")
+    local cfg = rawget(getfenv(), "configs") or {
+        vehicle = {
+            fx = 0,
+            fy = 0,
+            fz = 0,
+            fspeed = 100,
+            ftog = true
+        }
+    }
+    local cl = rawget(getfenv(), "client") or {
+        vehicleEntered = true
+    }
+    cleanupOldMotion(root)
+    local BodyGyro = createFlightGyro(root)
+    local flightLv, flightAttachment = createLinearMover(root)
+    local Camera = workspace.CurrentCamera
+    if not BodyGyro or not flightLv then
+        destroyMover(flightLv, flightAttachment, BodyGyro)
+        return
+    end
+    repeat
+        task.wait()
+        if not root.Parent then
+            break
+        end
+        BodyGyro.CFrame = Camera.CFrame * CFrame.Angles(math.rad(cfg.vehicle.fx or 0), math.rad(cfg.vehicle.fy or 0), math.rad(cfg.vehicle.fz or 0))
+        Camera.CameraType = Enum.CameraType.Track
+        flightLv.VectorVelocity = Vector3.zero
+        local playerModule = LocalPlayer.PlayerScripts:FindFirstChild("PlayerModule")
+        local controlModule = playerModule and playerModule:FindFirstChild("ControlModule")
+        if controlModule then
+            local direction = require(controlModule):GetMoveVector()
+            local velocity = Vector3.zero
+            if direction.X ~= 0 then
+                velocity += Camera.CFrame.RightVector * direction.X
+            end
+            if direction.Z ~= 0 then
+                velocity -= Camera.CFrame.LookVector * direction.Z
+            end
+            flightLv.VectorVelocity = velocity * (cfg.vehicle.fspeed or 100)
+        end
+    until not IsInVehicle() or cl.vehicleEntered == false or cfg.vehicle.ftog == false
+    Camera.CameraType = Enum.CameraType.Custom
+    destroyMover(flightLv, flightAttachment, BodyGyro)
+    print("[FLIGHT] Flight handler ended")
+end
+local function onSpawn(char)
+    if isRunning then
+        print("[SPAWN] Script already running, waiting for previous spawn to finish...")
+        task.wait(2)
+    end
+    isRunning = true
+    print("[SPAWN] Player spawned, initializing...")
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if not root then
+        print("[SPAWN] Failed to get HumanoidRootPart!")
+        isRunning = false
+        return
+    end
+    task.wait(1)
+    pcall(function()
+        cleanupOldMotion(root)
+        if IsInVehicle() then
+            print("[SPAWN] Player in vehicle at spawn, starting vehicle flight...")
+            UpdateRememberedCar()
+            handleVehicleFlight()
+            return
+        end
+        print("[SPAWN] Finding closest station...")
+        local closestData, minDist = nil, math.huge
+        for _, data in pairs(Stations) do
+            local dist = (root.Position - data.Base).Magnitude
+            if dist < minDist then
+                minDist = dist
+                closestData = data
+            end
+        end
+        if closestData then
+            print("[SPAWN] Moving to closest station, distance: " .. minDist)
+            for _, wp in ipairs(closestData.Path) do
+                if not char.Parent or not root.Parent or IsInVehicle() then
+                    break
+                end
+                char:PivotTo(CFrame.new(wp))
+                task.wait(0.2)
+            end
+        end
+        print("[SPAWN] Searching for vehicle...")
+        local blacklisted = {}
+        while char.Parent and root.Parent and not IsInVehicle() do
+            local nearestVeh = FindNearestCamaroOrJeep(root, blacklisted)
+            if not nearestVeh then
+                print("[SPAWN] No more vehicles found!")
+                break
+            end
+            print("[SPAWN] Found vehicle at distance: " .. (nearestVeh:GetPivot().Position - root.Position).Magnitude)
+            flyToPos(char, root, nearestVeh:GetPivot().Position)
+            if IsInVehicle() then
+                break
+            end
+            task.wait(0.1)
+            local entered = false
+            for i = 1, 5 do
+                print("[SPAWN] Entering vehicle attempt " .. i)
+                enterVehicle(root)
+                task.wait(0.3)
+                if IsInVehicle() then
+                    entered = true
+                    break
+                end
+            end
+            if entered or IsInVehicle() then
+                print("[SPAWN] Successfully entered vehicle!")
+                task.wait(0.2)
+                UpdateRememberedCar()
+                handleVehicleFlight()
+                break
+            else
+                print("[SPAWN] Failed to enter vehicle, blacklisting...")
+                blacklisted[nearestVeh] = true
+            end
+        end
+        print("[SPAWN] Spawn sequence completed")
+    end)
+    isRunning = false
+    print("[SPAWN] Spawn flag reset")
+end
+LocalPlayer.CharacterAdded:Connect(onSpawn)
+if LocalPlayer.Character then
+    task.spawn(onSpawn, LocalPlayer.Character)
+end
+```
