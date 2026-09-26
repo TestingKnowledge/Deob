@@ -1,4 +1,4 @@
-```lua
+
 if not LPH_OBFUSCATED then
     LPH_JIT_MAX = function(...) return (...) end
     LPH_NO_VIRTUALIZE = function(...) return (...) end
@@ -1355,4 +1355,4 @@ LocalPlayer.CharacterAdded:Connect(onSpawn)
 if LocalPlayer.Character then
     task.spawn(onSpawn, LocalPlayer.Character)
 end
-```
+
