@@ -1,0 +1,713 @@
+if not LPH_OBFUSCATED then
+    LPH_JIT_MAX=function(...) return(...) end
+    LPH_NO_VIRTUALIZE=function(...) return(...) end
+    LRM_IsUserPremium=true
+    script_key="a"
+end
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local LocalPlayer = Players.LocalPlayer
+local OverwriteCnt = 0
+local ExitFunc = nil
+local isRunning = false
+
+-- Locate InventorySystem safely
+local invSys
+pcall(function()
+    invSys = require(ReplicatedStorage:FindFirstChild("Inventory", true):FindFirstChild("InventoryItemSystem", true))
+end)
+
+-- Locate AttemptArrest GC function safely
+local attemptArrest = nil
+pcall(function()
+    for _, v in pairs(getgc(true)) do
+        if type(v) == "function" then
+            local name = ""
+            pcall(function() name = debug.info(v, "n") end)
+            if name == "" and getinfo then
+                pcall(function() name = tostring(getinfo(v).name) end)
+            end
+            if name == "AttemptArrest" then
+                attemptArrest = v
+                break
+            end
+        end
+    end
+end)
+
+if LPH_NO_VIRTUALIZE then
+    LPH_NO_VIRTUALIZE(function()
+        for i,v in pairs(getgc(true)) do
+            if typeof(v)=="function" then
+                if debug.info(v,"n"):match("CheatCheck") then
+                    hookfunction(v,function() end)
+                end
+            end
+            if typeof(v)=="function" and getfenv(v).script==LocalPlayer.PlayerScripts:FindFirstChild("LocalScript") then
+                local con=getconstants(v)
+                if table.find(con,"LastVehicleExit") and table.find(con,"tick") then
+                    ExitFunc=v
+                end
+            end
+        end
+    end)()
+    LPH_NO_VIRTUALIZE(function()
+        for i,v in pairs(workspace:GetChildren()) do
+            if v.Name=="Bench" then v:Destroy() end
+        end
+    end)()
+    local TagUtils = require(ReplicatedStorage:FindFirstChild("TagUtils",true))
+    if TagUtils then
+        TagUtils.isPointInTag = LPH_NO_VIRTUALIZE(function(_,Tag)
+            if Tag=="NoFallDamage" or Tag=="NoRagdoll" or Tag=="NoParachute" then
+                return true
+            end
+        end)
+    end
+end
+
+local Config = {
+    UpHeight = 100,
+    DownOffset = 3,
+    UpSpeed = 120,
+    CruiseSpeed = 120,
+    DownSpeed = 120,
+    CriminalCruiseSpeed = 300,
+    TeleportDistance = 2,
+    OnFootDescendDistance = 3,
+    OnFootFlySpeed = 150,
+    CloseBackDistance = 4,
+    BackOffset = 5,
+    AbortLaunchHeight = 300
+}
+
+local Stations = {
+    ["Custom Main Station Path"] = {
+        Base = Vector3.new(-1173.24, 39.42, -1583.77),
+        Path = {
+            Vector3.new(-1173.24, 39.42, -1583.77), Vector3.new(-1177.93, 39.42, -1580.66), Vector3.new(-1184.32, 39.42, -1575.63),
+            Vector3.new(-1188.49, 39.42, -1568.75), Vector3.new(-1187.33, 39.42, -1560.60), Vector3.new(-1184.78, 39.42, -1552.89),
+            Vector3.new(-1182.62, 39.42, -1546.72), Vector3.new(-1175.61, 34.97, -1546.03), Vector3.new(-1168.76, 30.16, -1546.55),
+            Vector3.new(-1161.44, 27.15, -1547.99), Vector3.new(-1156.07, 23.25, -1551.89), Vector3.new(-1154.36, 21.12, -1559.06),
+            Vector3.new(-1157.26, 19.07, -1566.29), Vector3.new(-1162.58, 19.02, -1572.38), Vector3.new(-1169.74, 19.02, -1576.19),
+            Vector3.new(-1177.62, 19.02, -1578.67), Vector3.new(-1185.61, 19.07, -1580.14), Vector3.new(-1193.86, 19.07, -1580.63),
+            Vector3.new(-1201.85, 19.07, -1580.43), Vector3.new(-1209.98, 19.07, -1580.09), Vector3.new(-1218.11, 19.07, -1580.18),
+            Vector3.new(-1226.36, 19.07, -1579.78), Vector3.new(-1234.43, 19.02, -1578.75), Vector3.new(-1239.75, 19.07, -1573.05),
+            Vector3.new(-1243.11, 19.07, -1565.64), Vector3.new(-1248.50, 19.02, -1559.53), Vector3.new(-1256.50, 19.02, -1558.65),
+            Vector3.new(-1262.43, 19.02, -1554.62), Vector3.new(-1259.15, 18.71, -1549.22), Vector3.new(-1251.26, 18.62, -1547.54),
+            Vector3.new(-1244.88, 18.62, -1546.87)
+        }
+    },
+    ["Fourth Station"] = {
+        Base = Vector3.new(1786.66, 24.05, -4019.01),
+        Path = {
+            Vector3.new(1762.26, 24.00, -4024.93), Vector3.new(1765.20, 24.02, -4026.29), Vector3.new(1772.61, 24.05, -4029.64),
+            Vector3.new(1779.17, 24.00, -4034.16), Vector3.new(1785.04, 24.00, -4040.16), Vector3.new(1790.33, 24.25, -4046.51),
+            Vector3.new(1792.76, 24.50, -4049.68), Vector3.new(1793.25, 24.50, -4053.24), Vector3.new(1790.91, 24.09, -4061.18),
+            Vector3.new(1786.38, 24.10, -4068.25), Vector3.new(1784.77, 24.10, -4076.59), Vector3.new(1778.85, 23.80, -4092.15),
+            Vector3.new(1778.73, 23.80, -4093.07)
+        }
+    },
+    ["Main Police Station Ground"] = {
+        Base = Vector3.new(-1171.10, 18.80, -1579.22),
+        Path = {
+            Vector3.new(-1142.16, 18.85, -1586.02), Vector3.new(-1146.80, 18.85, -1585.55), Vector3.new(-1155.16, 18.85, -1584.71),
+            Vector3.new(-1163.53, 18.85, -1583.90), Vector3.new(-1171.65, 18.85, -1583.56), Vector3.new(-1179.64, 18.85, -1583.26),
+            Vector3.new(-1188.04, 18.85, -1582.97), Vector3.new(-1196.30, 18.85, -1582.68), Vector3.new(-1204.70, 18.85, -1582.39),
+            Vector3.new(-1212.83, 18.85, -1582.11), Vector3.new(-1220.96, 18.85, -1581.82), Vector3.new(-1229.09, 18.85, -1581.42),
+            Vector3.new(-1236.90, 18.80, -1579.45), Vector3.new(-1241.89, 18.85, -1573.22), Vector3.new(-1244.30, 18.85, -1565.59),
+            Vector3.new(-1249.61, 18.80, -1559.48), Vector3.new(-1257.60, 18.80, -1559.35), Vector3.new(-1263.00, 18.79, -1555.37),
+            Vector3.new(-1260.26, 18.40, -1547.61), Vector3.new(-1252.41, 18.40, -1546.17), Vector3.new(-1244.15, 18.40, -1546.12),
+            Vector3.new(-1244.08, 18.40, -1546.12)
+        }
+    },
+    ["Museum Police Station"] = {
+        Base = Vector3.new(738.20, 44.96, 1120.53),
+        Path = {
+            Vector3.new(732.75, 44.96, 1125.10), Vector3.new(733.10, 44.96, 1122.05), Vector3.new(733.02, 44.96, 1113.69),
+            Vector3.new(731.74, 44.96, 1105.80), Vector3.new(730.05, 44.96, 1097.57), Vector3.new(728.25, 44.95, 1089.37),
+            Vector3.new(730.33, 44.94, 1081.29), Vector3.new(735.58, 44.37, 1075.00), Vector3.new(741.75, 44.77, 1069.30),
+            Vector3.new(744.70, 44.96, 1066.60)
+        }
+    },
+    ["Military Base"] = {
+        Base = Vector3.new(1801.00, 25.54, -891.02),
+        Path = {
+            Vector3.new(1805.17, 25.54, -900.65), Vector3.new(1805.17, 25.54, -900.65), Vector3.new(1799.38, 25.54, -901.80),
+            Vector3.new(1791.31, 25.57, -902.75), Vector3.new(1783.10, 25.60, -903.71), Vector3.new(1775.02, 25.54, -904.70),
+            Vector3.new(1766.97, 25.54, -905.80), Vector3.new(1758.94, 25.54, -907.13), Vector3.new(1753.12, 25.54, -908.27),
+            Vector3.new(1753.12, 25.54, -908.27)
+        }
+    },
+    ["Fifth Station"] = {
+        Base = Vector3.new(1822.10, 25.55, -636.60),
+        Path = {
+            Vector3.new(1820.55, 25.54, -607.59), Vector3.new(1822.75, 25.54, -616.20), Vector3.new(1827.02, 25.54, -623.28),
+            Vector3.new(1831.25, 25.54, -630.38), Vector3.new(1835.55, 25.08, -637.60), Vector3.new(1844.01, 25.00, -651.80),
+            Vector3.new(1848.31, 25.00, -659.02)
+        }
+    }
+}
+
+local function GetCurrentVehicle()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local seat = hum and hum.SeatPart
+    if seat then
+        return seat:FindFirstAncestorOfClass("Model") or seat.Parent
+    end
+    return nil
+end
+
+local function GetTargetVehicle(char)
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    local seat = hum and hum.SeatPart
+    if seat then
+        return seat:FindFirstAncestorOfClass("Model") or seat.Parent
+    end
+    if workspace:FindFirstChild("Vehicles") then
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then
+            for _, v in ipairs(workspace.Vehicles:GetChildren()) do
+                if (v:GetPivot().Position - root.Position).Magnitude < 15 then
+                    return v
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function IsInVehicle()
+    local char = LocalPlayer.Character
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    return (hum and (hum.Sit or hum.SeatPart ~= nil)) or (GetCurrentVehicle() ~= nil)
+end
+
+local function IsUndergroundOrIndoor(character)
+    local root = character and character:FindFirstChild("HumanoidRootPart")
+    if not root then return true end
+
+    if root.Position.Y < 5 then return true end
+
+    local raycastParams = RaycastParams.new()
+    raycastParams.FilterDescendantsInstances = {character, LocalPlayer.Character, workspace:FindFirstChild("Vehicles")}
+    raycastParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local rayResult = workspace:Raycast(root.Position, Vector3.new(0, 150, 0), raycastParams)
+    if rayResult and rayResult.Instance then
+        return true
+    end
+
+    return false
+end
+
+local function FindNearestCriminal(root, radius)
+    local nearest, dist = nil, radius or math.huge
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer and p.Team and p.Team.Name == "Criminal" then
+            local c = p.Character
+            local r = c and c:FindFirstChild("HumanoidRootPart")
+            if r and not IsUndergroundOrIndoor(c) then
+                local d = (r.Position - root.Position).Magnitude
+                if d < dist then nearest, dist = p, d end
+            end
+        end
+    end
+    return nearest, dist
+end
+
+local function FindNearestCamaroOrJeep(root, blacklisted)
+    local nearest, dist = nil, math.huge
+    for _, v in ipairs(workspace.Vehicles:GetChildren()) do
+        if not blacklisted[v] then
+            local n = v.Name:lower()
+            if n:find("camaro",1,true) or n:find("jeep",1,true) then
+                local p = v:GetPivot().Position
+                local d = (p - root.Position).Magnitude
+                if d < dist then nearest, dist = v, d end
+            end
+        end
+    end
+    return nearest, dist
+end
+
+local function enterVehicle(root)
+    local UI = require(ReplicatedStorage.Module.UI)
+    for _, v in pairs(workspace.Vehicles:GetChildren()) do
+        if v:FindFirstChild("Seat") and (v.Seat.Position - root.Position).Magnitude < 15 then
+            for _, spec in pairs(UI.CircleAction.Specs) do
+                if spec.Part and spec.Part == v.Seat then
+                    spec:Callback(true)
+                    break
+                end
+            end
+            break
+        end
+    end
+end
+
+local function pressSpaceKey()
+    pcall(function()
+        VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.Space, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Space, false, game)
+    end)
+end
+
+local function EquipHandcuffs()
+    if not invSys then return false end
+    local success = false
+    pcall(function()
+        for _, item in pairs(invSys.getInventoryItemsFor(LocalPlayer)) do
+            if item.obj and item.obj.Name == "Handcuffs" then
+                item:AttemptSetEquipped(true)
+                success = true
+                break
+            end
+        end
+    end)
+    return success
+end
+
+local function EjectVehicleTarget(targetVeh)
+    if not targetVeh then return end
+    local uiModule = ReplicatedStorage:FindFirstChild("Module", true) and require(ReplicatedStorage.Module:FindFirstChild("UI", true) or ReplicatedStorage.Module)
+    if uiModule and uiModule.CircleAction and uiModule.CircleAction.Specs then
+        for _, spec in pairs(uiModule.CircleAction.Specs) do
+            local isMatch = false
+            if spec.Part and (targetVeh:IsAncestorOf(spec.Part) or spec.Part:IsDescendantOf(targetVeh)) then
+                isMatch = true
+            elseif spec.Text and (spec.Text:lower():find("eject") or spec.Text:lower():find("passenger")) then
+                isMatch = true
+            end
+
+            if isMatch then
+                pcall(function() spec:Callback(true) end)
+                break
+            end
+        end
+    end
+end
+
+local function ArrestTarget(targetPlayer)
+    if attemptArrest and targetPlayer then
+        pcall(function() attemptArrest(targetPlayer) end)
+    end
+end
+local function launchUpToSafety(root, launchAmount)
+    print("[SAFETY TRIGGERED] Target invalid or went indoors! Ascending back up...")
+    local targetY = root.Position.Y + (launchAmount or Config.AbortLaunchHeight)
+    
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    bv.Velocity = Vector3.new(0, Config.UpSpeed, 0)
+    bv.Parent = root
+    
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    local look = root.CFrame.LookVector
+    -- Keeps the car leveled out when ascending
+    bg.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(look.X, 0, look.Z))
+    bg.Parent = root
+    
+    while root.Parent and root.Position.Y < targetY and IsInVehicle() do
+        task.wait()
+    end
+    
+    bv:Destroy()
+    bg:Destroy()
+end
+local function flyToPos(char, root, targetPos)
+    if IsInVehicle() then return end
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    bv.Velocity = Vector3.zero
+    bv.Parent = root
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    bg.CFrame = root.CFrame
+    bg.Parent = root
+
+    local function moveTo(dest, speed)
+        while char.Parent and root.Parent and not IsInVehicle() do
+            local diff = dest - root.Position
+            local dist = diff.Magnitude
+            local dt = task.wait()
+            if dist <= speed * dt then
+                root.CFrame = CFrame.new(dest)
+                break
+            end
+            root.CFrame = CFrame.new(root.Position + diff.Unit * (speed * dt))
+        end
+    end
+
+    local upPos = root.Position + Vector3.new(0, Config.UpHeight, 0)
+    local cruisePos = Vector3.new(targetPos.X, upPos.Y, targetPos.Z)
+    local downPos = targetPos + Vector3.new(0, Config.DownOffset, 0)
+    moveTo(upPos, Config.UpSpeed)
+    moveTo(cruisePos, Config.CruiseSpeed)
+    moveTo(downPos, Config.DownSpeed)
+    bv:Destroy()
+    bg:Destroy()
+end
+
+local function flyOnFootToTargetAndBackTeleport(char, root, crimPlayer, speed)
+    local crimChar = crimPlayer.Character
+    local targetRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+    if not targetRoot then return end
+
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    bv.Velocity = Vector3.zero
+    bv.Parent = root
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    bg.CFrame = root.CFrame
+    bg.Parent = root
+
+    while char.Parent and root.Parent and targetRoot and targetRoot.Parent and not IsInVehicle() do
+        if IsUndergroundOrIndoor(crimChar) then
+            print("[ON FOOT ABORT] Target entered building/cave during foot chase!")
+            bv:Destroy()
+            bg:Destroy()
+            return
+        end
+
+        EquipHandcuffs()
+        local diff = targetRoot.Position - root.Position
+        local dist = diff.Magnitude
+        local dt = task.wait()
+
+        bg.CFrame = CFrame.lookAt(root.Position, targetRoot.Position)
+
+        if dist <= Config.CloseBackDistance then
+            print("[CLOSE ENOUGH] Reached <= 4 studs! Switching to loop teleport behind back & arresting...")
+            break
+        end
+
+        root.CFrame = CFrame.new(root.Position + diff.Unit * (speed * dt))
+    end
+
+    bv:Destroy()
+    bg:Destroy()
+
+    while char.Parent and root.Parent and targetRoot and targetRoot.Parent and not IsInVehicle() do
+        if IsUndergroundOrIndoor(crimChar) then
+            print("[TELEPORT ABORT] Target ran inside building/cave!")
+            break
+        end
+
+        EquipHandcuffs()
+        if typeof(sethiddenproperty) == "function" then
+            pcall(function()
+                sethiddenproperty(root, "PhysicsRepRootPart", targetRoot)
+            end)
+        end
+        local backCFrame = targetRoot.CFrame * CFrame.new(0, 0, Config.BackOffset)
+        root.CFrame = backCFrame
+
+        ArrestTarget(crimPlayer)
+
+        task.wait()
+    end
+end
+local function flyVehicleToCriminal(root, crimPlayer, speed)
+    local crimChar = crimPlayer.Character
+    local crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+    if not crimRoot then return false end
+
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    bv.Velocity = Vector3.zero
+    bv.Parent = root
+
+    local bg = Instance.new("BodyGyro")
+    bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    bg.CFrame = root.CFrame
+    bg.Parent = root
+
+    local targetInVeh = crimChar:GetAttribute("InVehicle")
+    local stopDistance = targetInVeh and Config.TeleportDistance or Config.OnFootDescendDistance
+    local aborted = false
+
+    while root.Parent and IsInVehicle() do
+        -- Check if target is valid inside the loop to guarantee the abort triggers
+        if not (crimRoot and crimRoot.Parent) or IsUndergroundOrIndoor(crimChar) then
+            aborted = true
+            break
+        end
+
+        local targetPos = crimRoot.Position
+        local overheadPos = Vector3.new(targetPos.X, root.Position.Y, targetPos.Z)
+        local diff = overheadPos - root.Position
+        local dist = diff.Magnitude
+        local dt = task.wait()
+
+        bg.CFrame = CFrame.lookAt(root.Position, Vector3.new(overheadPos.X, root.Position.Y, overheadPos.Z))
+        if dist <= speed * dt then
+            root.CFrame = CFrame.new(overheadPos)
+            break
+        end
+        root.CFrame = CFrame.new(root.Position + diff.Unit * (speed * dt))
+    end
+
+    while not aborted and root.Parent and IsInVehicle() do
+        if not (crimRoot and crimRoot.Parent) or IsUndergroundOrIndoor(crimChar) then
+            aborted = true
+            break
+        end
+
+        local currentTarget = crimRoot.Position
+        local currentDist = (root.Position - currentTarget).Magnitude
+
+        if currentDist <= stopDistance then
+            break
+        end
+
+        local diff = currentTarget - root.Position
+        local dt = task.wait()
+        bg.CFrame = CFrame.lookAt(root.Position, currentTarget)
+
+        if diff.Magnitude <= speed * dt then
+            root.CFrame = CFrame.new(currentTarget)
+            break
+        end
+        root.CFrame = CFrame.new(root.Position + diff.Unit * (speed * dt))
+    end
+
+    bv:Destroy()
+    bg:Destroy()
+
+    if aborted then
+        launchUpToSafety(root, 300)
+        return false
+    end
+
+    if crimRoot and crimRoot.Parent then
+        if not targetInVeh then
+            print("[TARGET ON FOOT] Reached 3 studs, jumping out, equipping handcuffs & chasing target...")
+            pressSpaceKey()
+            EquipHandcuffs()
+            task.wait(0.2)
+
+            local char = LocalPlayer.Character
+            local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+            if myRoot and crimRoot and crimRoot.Parent then
+                flyOnFootToTargetAndBackTeleport(char, myRoot, crimPlayer, Config.OnFootFlySpeed)
+            end
+        else
+            print("[TARGET IN VEHICLE] Teleporting vehicle on target and ejecting until tire pop / health drop / exit...")
+            local targetVehicle = GetTargetVehicle(crimChar)
+
+            if targetVehicle then
+                local initialPop = targetVehicle:GetAttribute("VehicleTiresLastPop") or 0
+                local initialTireHealth = targetVehicle:GetAttribute("VehicleTireHealth") or 100
+
+                while root.Parent and IsInVehicle() do
+                    if not (crimRoot and crimRoot.Parent) or IsUndergroundOrIndoor(crimChar) then
+                        print("[RAMMING ABORT] Target went invalid or entered roof/cave while in vehicle!")
+                        launchUpToSafety(root, 300)
+                        return false
+                    end
+
+                    if typeof(sethiddenproperty) == "function" then
+                        pcall(function()
+                            sethiddenproperty(root, "PhysicsRepRootPart", crimRoot)
+                        end)
+                    end
+                    root.CFrame = crimRoot.CFrame
+
+                    EjectVehicleTarget(targetVehicle)
+
+                    local currentPop = targetVehicle:GetAttribute("VehicleTiresLastPop") or 0
+                    local currentTireHealth = targetVehicle:GetAttribute("VehicleTireHealth") or initialTireHealth
+                    local stillInVeh = crimChar:GetAttribute("InVehicle")
+
+                    if currentPop ~= initialPop or currentTireHealth < initialTireHealth or not stillInVeh then
+                        print("[TIRE POPPED / HEALTH CHANGED / EXITED] Stopping vehicle teleport...")
+                        break
+                    end
+
+                    task.wait()
+                end
+            end
+
+            print("[AFTER RAMMING] Jumping out, equipping handcuffs, and chasing target on foot...")
+            pressSpaceKey()
+            EquipHandcuffs()
+            task.wait(0.2)
+
+            local char = LocalPlayer.Character
+            local myRoot = char and char:FindFirstChild("HumanoidRootPart")
+            if myRoot and crimRoot and crimRoot.Parent then
+                flyOnFootToTargetAndBackTeleport(char, myRoot, crimPlayer, Config.OnFootFlySpeed)
+            end
+        end
+    else
+        launchUpToSafety(root, 300)
+        return false
+    end
+    
+    return true
+end
+local function handleVehicleFlight()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local targetY = root.Position.Y + 500
+    
+    local launchVelocity = Instance.new("BodyVelocity")
+    launchVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+    launchVelocity.Velocity = Vector3.new(0, 200, 0)
+    launchVelocity.Parent = root
+    
+    local launchGyro = Instance.new("BodyGyro")
+    launchGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+    local look = root.CFrame.LookVector
+    launchGyro.CFrame = CFrame.lookAt(root.Position, root.Position + Vector3.new(look.X, 0, look.Z))
+    launchGyro.Parent = root
+
+    -- 1. Initial Ascent
+    while root.Parent and root.Position.Y < targetY and IsInVehicle() do
+        task.wait()
+    end
+    
+    -- 2. Master Search & Hover Loop
+    while root.Parent and IsInVehicle() do
+        -- Freeze vehicle in air while scanning for a target
+        launchVelocity.Parent = root
+        launchGyro.Parent = root
+        launchVelocity.Velocity = Vector3.zero 
+        
+        local nearestCrim, _ = FindNearestCriminal(root)
+        if nearestCrim then
+            -- Target found! Temporarily un-parent hover so flyVehicleToCriminal handles physics
+            launchVelocity.Parent = nil
+            launchGyro.Parent = nil
+            
+            local success = flyVehicleToCriminal(root, nearestCrim, Config.CriminalCruiseSpeed)
+            
+            if not success then
+                -- Chase aborted (target hid/died). Wait slightly before searching again.
+                -- (launchVelocity will be re-applied on the next loop iteration, making it hover)
+                task.wait(0.5)
+            else
+                -- Successfully jumped out of the vehicle and initiated on-foot phase
+                break
+            end
+        else
+            -- No valid targets on map, continue hovering indefinitely
+            task.wait(1)
+        end
+    end
+
+    if launchVelocity then launchVelocity:Destroy() end
+    if launchGyro then launchGyro:Destroy() end
+
+    -- 3. Manual Flight Fallback (if user manually exits auto-mode or jumps out)
+    local cfg = rawget(getfenv(), "configs") or { vehicle = { fx = 0, fy = 0, fz = 0, fspeed = 100, ftog = true } }
+    local cl = rawget(getfenv(), "client") or { vehicleEntered = true }
+
+    local BodyGyro = Instance.new("BodyGyro", root)
+    local BodyVelocity = Instance.new("BodyVelocity", root)
+    local Camera = workspace.CurrentCamera
+
+    BodyVelocity.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+    BodyGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    BodyGyro.D = 50000
+    BodyGyro.P = 150000000
+
+    repeat
+        task.wait()
+        if not root.Parent then break end
+        BodyGyro.CFrame = Camera.CFrame * CFrame.Angles(
+            math.rad(cfg.vehicle.fx or 0), 
+            math.rad(cfg.vehicle.fy or 0), 
+            math.rad(cfg.vehicle.fz or 0)
+        )
+        Camera.CameraType = Enum.CameraType.Track
+        BodyVelocity.Velocity = Vector3.zero
+
+        local playerModule = LocalPlayer.PlayerScripts:FindFirstChild("PlayerModule")
+        local controlModule = playerModule and playerModule:FindFirstChild("ControlModule")
+        if controlModule then
+            local direction = require(controlModule):GetMoveVector()
+            if direction.X > 0 then
+                BodyVelocity.Velocity = BodyVelocity.Velocity + Camera.CFrame.RightVector * direction.X
+            end
+            if direction.X < 0 then
+                BodyVelocity.Velocity = BodyVelocity.Velocity + Camera.CFrame.RightVector * direction.X
+            end
+            if direction.Z > 0 then
+                BodyVelocity.Velocity = BodyVelocity.Velocity - Camera.CFrame.LookVector * direction.Z
+            end
+            if direction.Z < 0 then
+                BodyVelocity.Velocity = BodyVelocity.Velocity - Camera.CFrame.LookVector * direction.Z
+            end
+            BodyVelocity.Velocity = BodyVelocity.Velocity * (cfg.vehicle.fspeed or 100)
+        end
+    until not IsInVehicle() or cl.vehicleEntered == false or cfg.vehicle.ftog == false
+
+    Camera.CameraType = Enum.CameraType.Custom
+    BodyGyro:Destroy()
+    BodyVelocity:Destroy()
+end
+local function onSpawn(char)
+    if isRunning then return end
+    isRunning = true
+    local root = char:WaitForChild("HumanoidRootPart", 10)
+    if not root then isRunning = false return end
+    task.wait(0.5)
+
+    if IsInVehicle() then
+        handleVehicleFlight()
+        isRunning = false
+        return
+    end
+
+    local closestData, minDist = nil, math.huge
+    for _, data in pairs(Stations) do
+        local dist = (root.Position - data.Base).Magnitude
+        if dist < minDist then
+            minDist = dist
+            closestData = data
+        end
+    end
+
+    if closestData then
+        for _, wp in ipairs(closestData.Path) do
+            if not char.Parent or not root.Parent or IsInVehicle() then break end
+            char:PivotTo(CFrame.new(wp))
+            task.wait(0.2)
+        end
+    end
+
+    local blacklisted = {}
+    while char.Parent and root.Parent and not IsInVehicle() do
+        local nearestVeh = FindNearestCamaroOrJeep(root, blacklisted)
+        if not nearestVeh then break end
+        flyToPos(char, root, nearestVeh:GetPivot().Position)
+        if IsInVehicle() then break end
+        task.wait(0.1)
+        for _ = 1, 5 do
+            enterVehicle(root)
+            task.wait(0.3)
+            if IsInVehicle() then break end
+        end
+
+        if IsInVehicle() then
+            handleVehicleFlight()
+            break
+        else
+            blacklisted[nearestVeh] = true
+        end
+    end
+    isRunning = false
+end
+
+LocalPlayer.CharacterAdded:Connect(onSpawn)
+if LocalPlayer.Character then task.spawn(onSpawn, LocalPlayer.Character) end
