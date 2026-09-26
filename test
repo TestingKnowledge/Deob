@@ -890,79 +890,152 @@ local function flyToPos(char, root, targetPos)
     moveTo(downPos, Config.DownSpeed)
     destroyMover(lv, attachment, bg)
 end
+
 local function flyOnFootToTargetAndArrest(char, root, crimPlayer, speed)
     print("[PURSUIT] Starting on-foot pursuit of criminal...")
     print("[PURSUIT] 10-second timeout active")
-    if not char or not root or not root.Parent then
+
+    if not char or not char.Parent or not root or not root.Parent then
         print("[PURSUIT] Character or root is nil!")
         return false
     end
+
     if not IsPursuitTargetValid(crimPlayer) then
         print("[PURSUIT ABORT] Target is already invalid/covered")
         return false
     end
-    local crimChar = crimPlayer.Character
-    local targetRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
-    if not targetRoot then
-        print("[PURSUIT] Target root disappeared, aborting")
-        return false
-    end
+
     cleanupOldMotion(root)
+
     local lv, attachment = createLinearMover(root)
     local bg = createFlightGyro(root)
+
     if not lv then
         return false
     end
+
     local pursuitStart = tick()
     local pursuitTimeout = 10
+    local arrestDistance = 6
+    local approachDistance = 12
+    local arrestAttempts = 0
+    local lastArrest = 0
     local arrestedFlag = false
-    while char and char.Parent and root and root.Parent and targetRoot and targetRoot.Parent and not IsInVehicle() do
-        if tick() - pursuitStart > pursuitTimeout then
+
+    while char and char.Parent and root and root.Parent and not IsInVehicle() do
+        if tick() - pursuitStart >= pursuitTimeout then
             print("[PURSUIT TIMEOUT] 10 seconds elapsed, aborting pursuit!")
             break
         end
+
         if not IsPursuitTargetValid(crimPlayer) then
             print("[PURSUIT ABORT] Target became invalid or entered cover!")
             break
         end
-        crimChar = crimPlayer.Character
-        targetRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
-        if not targetRoot then
+
+        local crimChar = crimPlayer.Character
+        local targetRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+
+        if not crimChar or not crimChar.Parent or not targetRoot or not targetRoot.Parent then
             print("[PURSUIT ABORT] Target root disappeared!")
             break
         end
+
         if crimChar:GetAttribute("HasHandcuffs") then
             print("[PURSUIT SUCCESS] Target arrested!")
             arrestedFlag = true
             break
         end
-        local diff = targetRoot.Position - root.Position
-        if diff.Magnitude > 0.05 then
-            lv.VectorVelocity = diff.Unit * speed
-            if bg then
-                bg.CFrame = CFrame.lookAt(root.Position, targetRoot.Position)
-            end
-        else
+
+        if crimChar:GetAttribute("InVehicle") == true then
+            print("[PURSUIT] Target entered vehicle, stopping on-foot pursuit")
+            break
+        end
+
+        local targetPosition = targetRoot.Position
+        local offset = targetPosition - root.Position
+        local distance = offset.Magnitude
+
+        if distance <= arrestDistance then
             lv.VectorVelocity = Vector3.zero
-        end
-        if crimChar:GetAttribute("InVehicle") ~= true then
+
+            if bg then
+                bg.CFrame = CFrame.lookAt(root.Position, targetPosition)
+            end
+
             EquipHandcuffs()
-            ArrestTarget(crimPlayer)
+
+            if tick() - lastArrest >= 0.12 then
+                lastArrest = tick()
+                arrestAttempts = arrestAttempts + 1
+                ArrestTarget(crimPlayer)
+                print("[PURSUIT] Arrest attempt #" .. arrestAttempts .. " | distance=" .. string.format("%.2f", distance))
+            end
+
+            task.wait(0.03)
+        else
+            local direction = offset.Unit
+            local currentSpeed = speed
+
+            if distance < approachDistance then
+                currentSpeed = math.clamp(distance * 18, 45, speed)
+            end
+
+            lv.VectorVelocity = direction * currentSpeed
+
+            if bg then
+                bg.CFrame = CFrame.lookAt(root.Position, targetPosition)
+            end
+
+            if distance <= arrestDistance + 1 then
+                EquipHandcuffs()
+
+                if tick() - lastArrest >= 0.12 then
+                    lastArrest = tick()
+                    arrestAttempts = arrestAttempts + 1
+                    ArrestTarget(crimPlayer)
+                end
+            end
+
+            if typeof(sethiddenproperty) == "function" then
+                pcall(function()
+                    sethiddenproperty(root, "PhysicsRepRootPart", targetRoot)
+                end)
+            end
+
+            task.wait()
         end
-        task.wait()
     end
-    lv.VectorVelocity = Vector3.zero
+
+    if lv then
+        lv.VectorVelocity = Vector3.zero
+    end
+
     destroyMover(lv, attachment, bg)
+
+    if crimPlayer and crimPlayer.Character then
+        local finalChar = crimPlayer.Character
+
+        if finalChar:GetAttribute("HasHandcuffs") then
+            print("[PURSUIT SUCCESS] Target arrested!")
+            arrestedFlag = true
+        end
+    end
+
     if arrestedFlag then
-        print("[PURSUIT] Arrested! Unequipping handcuffs immediately...")
+        print("[PURSUIT] Arrest confirmed!")
         task.wait(0.1)
         UnequipHandcuffs()
-        print("[PURSUIT] Handcuffs unequipped...")
+        print("[PURSUIT] Handcuffs unequipped")
         return true
     end
+
     print("[PURSUIT] On-foot pursuit ended without arrest")
     return false
 end
+
+
+
 local function flyVehicleToCriminal(root, crimPlayer, speed)
     print("[VEHICLE] Starting pursuit of criminal in vehicle...")
     if not IsPursuitTargetValid(crimPlayer) then
@@ -1053,10 +1126,13 @@ local function flyVehicleToCriminal(root, crimPlayer, speed)
         return false
     end
     crimChar = crimPlayer.Character
-    crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
-    if crimRoot and crimRoot.Parent then
-        local char = LocalPlayer.Character
-        if not targetInVeh then
+crimRoot = crimChar and crimChar:FindFirstChild("HumanoidRootPart")
+
+if crimRoot and crimRoot.Parent then
+    local char = LocalPlayer.Character
+    targetInVeh = crimChar:GetAttribute("InVehicle") == true
+
+    if not targetInVeh then
             print("[VEHICLE] Target on foot, exiting vehicle and pursuing on foot...")
             for _, v in ipairs(char:GetDescendants()) do
                 if v:IsA("BasePart") then
